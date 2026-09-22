@@ -138,9 +138,8 @@ public:
   }
 };
 
-MotorController NEMA23stepper(Nema23stepPin, Nema23dirPin, Nema23enPin, Nema23AngleLimit, anglePermicroStep, Nema23MaxSpeed, Nema23MaxCurrent); //eerything here is red lined with xx is not a type
-
-MotorController Gearstepper(GearstepPin, GeardirPin, GearenPin, GearAngleLimit, anglePermicroStep, GearMaxSpeed, GearMaxCurrent); //same here with red lines and xx is not a type
+MotorController NEMA23stepper(Nema23stepPin, Nema23dirPin, Nema23enPin, Nema23AngleLimit, anglePermicroStep, Nema23MaxSpeed, Nema23MaxCurrent); 
+MotorController Gearstepper(GearstepPin, GeardirPin, GearenPin, GearAngleLimit, anglePermicroStep, GearMaxSpeed, GearMaxCurrent); 
 
 // --- Motor Collection ---
 MotorController* motors[] = { &NEMA23stepper, &Gearstepper };
