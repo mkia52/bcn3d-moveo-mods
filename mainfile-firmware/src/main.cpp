@@ -6,7 +6,7 @@
 const float microstepping = 8.0f; // microstepping setting (1, 2, 4, 8, 16, etc.)
 
 const int Nema23stepPin = 54; // Pin A0 (X_STEP_PIN)
-const int Nema23dirPin  = 56; // Pin A1 (X_DIR_PIN)
+const int Nema23dirPin  = 55; // Pin A1 (X_DIR_PIN)
 const int Nema23enPin   = 52; // Pin 38 (X_ENABLE_PIN)
 const float Nema23angleperstep = 1.8f; // degrees per step
 const float Nema23anglepermicrostep = Nema23angleperstep / microstepping; // degrees per microstep
@@ -150,10 +150,11 @@ public:
 
     // Convert angle to nearest integer step
     long targetStep = lroundf(targetMotorAngle / anglePerMicroStep);
-
+    
     moveTo(targetStep);
 
-    while(run()) {
+    while(distanceToGo() != 0) {
+      run();
       currentPositionUpdate();
       if(millis() - lastTelemetery >= 500){
         lastTelemetery = millis();
@@ -384,7 +385,7 @@ void handleSerialInput() {
                 break;
 
               case 'C':
-              case 'c': 
+              case 'c': {
                 if (!activeMotor->isDriverEnabled()) {
                   Serial.println(F("Driver disabled. Press 'E' to enable."));
                   break;
@@ -409,7 +410,7 @@ void handleSerialInput() {
                 else{
                   Serial.println("Failure");
                 }
-                break;
+                break;}
               
               default:
                 Serial.print(F("Unknown command: '"));
