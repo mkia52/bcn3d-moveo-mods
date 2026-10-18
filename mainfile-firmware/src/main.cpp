@@ -1,29 +1,81 @@
 #include <Arduino.h>
 #include <AccelStepper.h>
+#include <Servo.h>
 
-//driver TB6560
+//command for establishing serial connection for keyboard control: python -m serial.tools.miniterm COM13 115200 --raw
+// modify this command according to your serial port and baud rate and run it in a terminal to interact with the controller.
 
-const float anglePerStep = 1.8; // degrees per step for NEMA23
-const float microstepping = 8; // microstepping setting (1, 2, 4, 8, 16, etc.)
-const float anglePermicroStep = anglePerStep / microstepping; // degrees per microstep
+// --- Servo Configuration ---
+const int ServoPin = A0;
+Servo servo;
+float servoStepSize = 1.2f;             // Degrees per 20ms tick (adjust with +/-)
+const float SERVO_MIN_ANGLE = 0.0f;
+const float SERVO_MAX_ANGLE = 180.0f;
+float currentServoAngle = 0.0f;
 
-const int Nema23stepPin = 54; // Pin A0 (X_STEP_PIN)
-const int Nema23dirPin  = 55; // Pin A1 (X_DIR_PIN)
-const int Nema23enPin   = 52; // Pin 38 (X_ENABLE_PIN)
-const float Nema23AngleLimit = 60; 
-const int Nema23MaxSpeed = 400; // Max speed in steps per second
-const int Nema23MaxCurrent = 4.4; // Max current in Amperes
-const int Nema23MaxAcceleration = 100; // Acceleration in steps per second squared
+enum ServoState {
+  SERVO_IDLE,
+  SERVO_CW,   // Increasing angle (Closing)
+  SERVO_CCW   // Decreasing angle (Opening)
+};
+ServoState servoState = SERVO_IDLE;
+unsigned long lastServoJogTime = 0;
+unsigned long lastServoTickTime = 0;
+const unsigned long SERVO_TICK_INTERVAL_MS = 20; // 50 Hz servo update rate
 
-const int GearstepPin = 57;
-const int GeardirPin = 58;
-const int GearenPin = 53;
-const float GearAngleLimit = 60; 
-const int GearMaxSpeed = 3200; // Max speed in steps per second
-const int GearMaxCurrent = 1.4; // Max current in Amperes
-const int GearMaxAcceleration = 1600; // Acceleration in steps per second squared
+// Driver TB6560
+const float microstepping = 8.0f;
 
-const int MonitorPin = 2; // Pin 2 (X_LIMIT_PIN)
+// --- Stepper Pin definitions & Specs ---
+const int Nema23stepPin = A1; //on the driver it's written as CLK+
+const int Nema23dirPin  = A2; //on the driver it's written as CW+
+const int Nema23enPin   = 52; //on the driver it's written as EN+
+const float Nema23angleperstep = 1.8f;
+const float Nema23anglepermicrostep = Nema23angleperstep / microstepping;
+const float Nema23MaxSpeed = 1200.0f;
+const float Nema23MaxCurrent = 4.4f; 
+const float Nema23MaxAcceleration = 400.0f; 
+const float Nema23MotorShaftPulleyDiameter = 21.5f; 
+const float Nema23DrivenPulleyDiameter = 124.0f; 
+const float Nema23OutputtoInputPulleyRatio = Nema23DrivenPulleyDiameter / Nema23MotorShaftPulleyDiameter;
+
+const int GearstepPin = A3;
+const int GeardirPin  = A4;
+const int GearenPin   = 50;
+const float Gearangleperstep = 0.35f; 
+const float Gearanglepermicrostep = Gearangleperstep / microstepping; 
+const float GearMaxSpeed = 3200.0f; 
+const float GearMaxCurrent = 1.4f; 
+const float GearMaxAcceleration = 1600.0f; 
+const float GearMotorShaftPulleyDiameter = 21.5f; 
+const float GearDrivenPulleyDiameter = 45.0f;     
+const float GearOutputtoInputPulleyRatio = GearDrivenPulleyDiameter / GearMotorShaftPulleyDiameter;
+
+const int Wrist_roll_stepPin = A5;
+const int Wrist_roll_dirPin  = A7;
+const int Wrist_roll_enPin   = 53;
+const float Wrist_roll_angleperstep = 1.80f; 
+const float Wrist_roll_anglepermicrostep = Wrist_roll_angleperstep / microstepping; 
+const float Wrist_roll_MaxSpeed = 1600.0f; 
+const float Wrist_roll_MaxCurrent = 1.4f; 
+const float Wrist_roll_MaxAcceleration = 1600.0f; 
+const float Wrist_roll_MotorShaftPulleyDiameter = 1.0f; 
+const float Wrist_roll_DrivenPulleyDiameter = 1.0f; 
+const float Wrist_roll_OutputtoInputPulleyRatio = Wrist_roll_DrivenPulleyDiameter / Wrist_roll_MotorShaftPulleyDiameter;
+
+const int Wrist_pitch_stepPin = A8;
+const int Wrist_pitch_dirPin  = A9;
+const int Wrist_pitch_enPin   = 51;
+const float Wrist_pitch_angleperstep = 1.80f; 
+const float Wrist_pitch_anglepermicrostep = Wrist_pitch_angleperstep / microstepping; 
+const float Wrist_pitch_MaxSpeed = 1600.0f; 
+const float Wrist_pitch_MaxCurrent = 1.4f; 
+const float Wrist_pitch_MaxAcceleration = 1600.0f; 
+const float Wrist_pitch_MotorShaftPulleyDiameter = 1.0f; 
+const float Wrist_pitch_DrivenPulleyDiameter = 1.0f; 
+const float Wrist_pitch_OutputtoInputPulleyRatio = Wrist_pitch_DrivenPulleyDiameter / Wrist_pitch_MotorShaftPulleyDiameter;
+
+const int MonitorPin = 2;
 
 class MotorController : public AccelStepper {
 public:
@@ -34,52 +86,58 @@ public:
   };
 
 private:
-  float motorAngleMaxLimit;
-  long motorStepMaxLimit;
   float anglePerMicroStep;
+  float pulleyRatio;
+  float gearRatio;
 
-  float currentAngle = 0.0f;
-  long currentStep = 0;
+  float currentMotorPulleyAngle = 0.0f;
+  float currentDrivenPulleyAngle = 0.0f;
+  long  currentStep = 0;
+
+  float maxConfiguredSpeed;
+  float currentTargetSpeed;
+  float speedStepDelta;
 
   float maxCurrent;
   float idleCurrent;
 
   int _dirPin;
-
   int enablePin;
   bool driverEnabled = false;
   MotorState currentState;
 
 public:
-  MotorController(int stepPin, int dirPin, int enPin, float angleLimit, float anglePerStep, float maxSpd, float maxCur)
+  MotorController(int stepPin, int dirPin, int enPin,  
+                  float anglePerMicroStep, 
+                  float maxSpd, float maxAcc, float maxCur,
+                  float OutputtoInputPulleyRatio, 
+                  float gearRatio = 1.0f)
     : AccelStepper(AccelStepper::DRIVER, stepPin, dirPin),
-      motorAngleMaxLimit(angleLimit),
-      anglePerMicroStep(anglePerStep),
+      anglePerMicroStep(anglePerMicroStep),
+      pulleyRatio(OutputtoInputPulleyRatio > 0.0f ? OutputtoInputPulleyRatio : 1.0f),
+      gearRatio(gearRatio > 0.0f ? gearRatio : 1.0f),
+      maxConfiguredSpeed(maxSpd),
+      currentTargetSpeed(maxSpd * 0.5f),
+      speedStepDelta(100.0f),
       maxCurrent(maxCur),
       _dirPin(dirPin),
       enablePin(enPin)
   {
     pinMode(enablePin, OUTPUT);
-    digitalWrite(enablePin, LOW); // Active-LOW enable
+    setDriverEnabled(true);
 
     pinMode(stepPin, OUTPUT);
     pinMode(dirPin, OUTPUT);
 
-    setMotorStepMaxLimit();
-    setMaxSpeed(maxSpd);         // Inherited from AccelStepper
+    setMaxSpeed(maxSpd);
+    setAcceleration(maxAcc);
     setIdleCurrent(maxCurrent);
     
-    this->currentState = IDLE;   // Assigned to the member variable
+    this->currentState = IDLE;
   }
 
-  int directionPin(){
+  int directionPin() {
     return digitalRead(_dirPin);
-  }
-
-  void setMotorStepMaxLimit() {
-    if (anglePerMicroStep > 0.0f) {
-      motorStepMaxLimit = (long)(motorAngleMaxLimit / anglePerMicroStep);
-    }
   }
 
   void setIdleCurrent(float current) {
@@ -90,8 +148,8 @@ public:
     digitalWrite(enablePin, enable ? LOW : HIGH);
     driverEnabled = enable;
   }
-  
-  bool isDriverEnabled() {
+
+  bool isDriverEnabled() const {
     return driverEnabled;
   }
 
@@ -104,176 +162,389 @@ public:
     updateSpeed();
   }
 
-  long getStepMaxLimit() const {
-    return motorStepMaxLimit;
+  void increaseSpeed() {
+    currentTargetSpeed += speedStepDelta;
+    if (currentTargetSpeed > maxConfiguredSpeed) {
+      currentTargetSpeed = maxConfiguredSpeed;
+    }
+    updateSpeed();
   }
 
-  void moveToAngle(float targetAngle) {
-    if (targetAngle < -motorAngleMaxLimit || targetAngle > motorAngleMaxLimit) {
-      Serial.println("Target angle out of bounds.");
-      return;
+  void decreaseSpeed() {
+    currentTargetSpeed -= speedStepDelta;
+    if (currentTargetSpeed < 50.0f) {
+      currentTargetSpeed = 50.0f;
     }
+    updateSpeed();
+  }
 
-    long targetStep = (long)(targetAngle / anglePerMicroStep);
-    moveTo(targetStep);
+  float getTargetSpeed() const {
+    return currentTargetSpeed;
   }
 
   void currentPositionUpdate() {
     currentStep = currentPosition();
-    currentAngle = currentStep * anglePerMicroStep;
+    currentMotorPulleyAngle = (float)currentStep * anglePerMicroStep;
+
+    float totalRatio = pulleyRatio * gearRatio; 
+    if (totalRatio > 0.0f) {
+      currentDrivenPulleyAngle = currentMotorPulleyAngle / totalRatio;
+    }
+  }
+
+  float getDrivenPulleyAngle() {
+    return currentDrivenPulleyAngle;
+  }
+
+  long getCurrentPosition() {
+    return currentStep;
   }
 
   void updateSpeed() {
     switch (currentState) {
       case IDLE:
-        setSpeed(0);
+        setSpeed(0.0f);
         break;
       case CW:
-        setSpeed(maxSpeed());
+        setSpeed(currentTargetSpeed);
         break;
       case CCW:
-        setSpeed(-maxSpeed());
+        setSpeed(-currentTargetSpeed);
         break;
     }
   }
 };
 
-MotorController NEMA23stepper(Nema23stepPin, Nema23dirPin, Nema23enPin, Nema23AngleLimit, anglePermicroStep, Nema23MaxSpeed, Nema23MaxCurrent); //eerything here is red lined with xx is not a type
+// --- Instances ---
+MotorController NEMA23stepper(
+  Nema23stepPin, Nema23dirPin, Nema23enPin, 
+  Nema23anglepermicrostep, 
+  Nema23MaxSpeed, Nema23MaxAcceleration, Nema23MaxCurrent, 
+  Nema23OutputtoInputPulleyRatio
+); 
 
-MotorController Gearstepper(GearstepPin, GeardirPin, GearenPin, GearAngleLimit, anglePermicroStep, GearMaxSpeed, GearMaxCurrent); //same here with red lines and xx is not a type
+MotorController Gearstepper(
+  GearstepPin, GeardirPin, GearenPin, 
+  Gearanglepermicrostep, 
+  GearMaxSpeed, GearMaxAcceleration, GearMaxCurrent, 
+  GearOutputtoInputPulleyRatio
+);    
 
-// --- Motor Collection ---
-MotorController* motors[] = { &NEMA23stepper, &Gearstepper };
-const uint8_t NUM_MOTORS = sizeof(motors) / sizeof(motors[0]);
-const char* motorNames[2] = { "NEMA23", "GearStepper"};
+MotorController WristStepper_roll(
+  Wrist_roll_stepPin, Wrist_roll_dirPin, Wrist_roll_enPin, 
+  Wrist_roll_anglepermicrostep, 
+  Wrist_roll_MaxSpeed, Wrist_roll_MaxAcceleration, Wrist_roll_MaxCurrent, 
+  Wrist_roll_OutputtoInputPulleyRatio
+);
 
-uint8_t activeMotorIndex = 0; // Currently selected motor (0 = NEMA23, 1 = Gear)
+MotorController WristStepper_pitch(
+  Wrist_pitch_stepPin, Wrist_pitch_dirPin, Wrist_pitch_enPin, 
+  Wrist_pitch_anglepermicrostep, 
+  Wrist_pitch_MaxSpeed, Wrist_pitch_MaxAcceleration, Wrist_pitch_MaxCurrent, 
+  Wrist_pitch_OutputtoInputPulleyRatio
+);
+
+MotorController* motors[] = { &NEMA23stepper, &Gearstepper, &WristStepper_roll, &WristStepper_pitch };
+const uint8_t NUM_STEPPERS = sizeof(motors) / sizeof(motors[0]);
+const uint8_t TOTAL_ACTUATORS = NUM_STEPPERS + 1; // 4 Steppers + 1 Servo
+
+const char* motorNames[TOTAL_ACTUATORS] = { 
+  "NEMA23", 
+  "GearStepper", 
+  "WristStepper_roll", 
+  "WristStepper_pitch",
+  "GripperServo"
+};
+
+uint8_t activeMotorIndex = 0; 
 unsigned long lastTelemetryPrint = 0;
+unsigned long lastJogCommandTime = 0;
+const unsigned long JOG_TIMEOUT_MS = 250;
 
 void handleSerialInput();
 
 void setup() {
   Serial.begin(115200);
 
+  // Initialize Servo
+  servo.attach(ServoPin);
+  servo.write((int)round(currentServoAngle));
+
   pinMode(MonitorPin, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // Initialize all motors in the array
-  for (uint8_t i = 0; i < NUM_MOTORS; i++) {
-    motors[i]->setMinPulseWidth(20); // 20µs optocoupler pulse for TB6560
+  for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
+    motors[i]->setMinPulseWidth(20);
     motors[i]->setDriverEnabled(true);
     motors[i]->setState(MotorController::IDLE);
   }
 
-  Serial.println(F("--- Multi-Stepper Controller Online ---"));
-  Serial.println(F("Select Motor: [1] NEMA23 | [2] Gear"));
-  Serial.println(F("Control:      [D] CW     | [A] CCW   | [S] Stop | [E] Toggle Enable | [W] Zero Pos"));
-  Serial.print(F("Active Motor: "));
+  Serial.println(F("--- Multi-Axis Controller (Steppers + Servo) ---"));
+  Serial.println(F("Select Axis:   [1] NEMA23 | [2] Gear | [3] Wrist Roll | [4] Wrist Pitch | [5] Servo"));
+  Serial.println(F("Jogging:       [D] CW/Close | [A] CCW/Open (Hold to run, release to lock)"));
+  Serial.println(F("Speed Tuning:  [+] Increase Speed/Step | [-] Decrease Speed/Step"));
+  Serial.println(F("Other:         [E] Toggle Enable/Power | [W] Zero Position | [S] Stop"));
+  Serial.println(F("Servo Direct:  [O] Open | [C] or [P] Close (Operates servo anytime)"));
+  Serial.print(F("Active Axis: "));
   Serial.println(motorNames[activeMotorIndex]);
 }
 
 void loop() {
   handleSerialInput();
 
-  // Run all active, enabled motors
-  for (uint8_t i = 0; i < NUM_MOTORS; i++) {
-    if (motors[i]->getState() != MotorController::IDLE && motors[i]->isDriverEnabled()) {
-      motors[i]->runSpeed();
+  // Watchdog for Steppers
+  if (activeMotorIndex < NUM_STEPPERS) {
+    MotorController* activeMotor = motors[activeMotorIndex];
+    if (activeMotor->getState() != MotorController::IDLE) {
+      if (millis() - lastJogCommandTime > JOG_TIMEOUT_MS) {
+        activeMotor->setState(MotorController::IDLE);
+        Serial.print(motorNames[activeMotorIndex]);
+        Serial.print(F(" held at Position: "));
+        Serial.println(activeMotor->getCurrentPosition());
+      }
     }
   }
 
-  // Non-blocking telemetry output every 250ms for the selected motor
+  // Watchdog for Servo
+  if (servoState != SERVO_IDLE) {
+    if (millis() - lastServoJogTime > JOG_TIMEOUT_MS) {
+      servoState = SERVO_IDLE;
+      Serial.print(F("GripperServo held at Angle: "));
+      Serial.print(currentServoAngle, 1);
+      Serial.println(F(" deg"));
+    }
+  }
+
+  // Servo non-blocking update tick (50 Hz rate)
+  if (millis() - lastServoTickTime >= SERVO_TICK_INTERVAL_MS) {
+    lastServoTickTime = millis();
+    if (servoState == SERVO_CW) {
+      currentServoAngle += servoStepSize;
+      if (currentServoAngle > SERVO_MAX_ANGLE) currentServoAngle = SERVO_MAX_ANGLE;
+      if (servo.attached()) servo.write((int)round(currentServoAngle));
+    } else if (servoState == SERVO_CCW) {
+      currentServoAngle -= servoStepSize;
+      if (currentServoAngle < SERVO_MIN_ANGLE) currentServoAngle = SERVO_MIN_ANGLE;
+      if (servo.attached()) servo.write((int)round(currentServoAngle));
+    }
+  }
+
+  // Run all active steppers
+  for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
+    motors[i]->currentPositionUpdate();
+
+    if (!motors[i]->isDriverEnabled()) {
+      if (motors[i]->getState() != MotorController::IDLE) {
+        motors[i]->setState(MotorController::IDLE);
+      }
+      continue;
+    }
+
+    motors[i]->runSpeed();
+  }
+
+  digitalWrite(LED_BUILTIN, digitalRead(MonitorPin) == LOW ? HIGH : LOW);
+
+  // Telemetry stream while moving
   if (millis() - lastTelemetryPrint >= 250) {
     lastTelemetryPrint = millis();
-    MotorController* current = motors[activeMotorIndex];
-
-    if (current->getState() != MotorController::IDLE) {
-      Serial.print(motorNames[activeMotorIndex]);
-      Serial.print(F(" -> Step: "));
-      Serial.print(current->currentPosition());
-      Serial.print(F(" | Angle: "));
-      Serial.println(current->currentPosition() * anglePermicroStep);
-      Serial.print(F(" | Direction: "));
-      Serial.println(current->directionPin() == HIGH ? F("CW") : F("CCW"));
+    if (activeMotorIndex < NUM_STEPPERS) {
+      MotorController* activeMotor = motors[activeMotorIndex];
+      if (activeMotor->getState() != MotorController::IDLE) {
+        Serial.print(motorNames[activeMotorIndex]);
+        Serial.print(F(" -> Step: "));
+        Serial.print(activeMotor->getCurrentPosition());
+        Serial.print(F(" | Speed: "));
+        Serial.print(activeMotor->getTargetSpeed());
+        Serial.print(F(" steps/s | Direction: "));
+        Serial.println(activeMotor->directionPin() == HIGH ? F("CW") : F("CCW"));
+      }
+    } else {
+      if (servoState != SERVO_IDLE) {
+        Serial.print(motorNames[activeMotorIndex]);
+        Serial.print(F(" -> Angle: "));
+        Serial.print(currentServoAngle, 1);
+        Serial.print(F(" deg | StepSize: "));
+        Serial.print(servoStepSize, 2);
+        Serial.print(F(" deg/tick | Direction: "));
+        Serial.println(servoState == SERVO_CW ? F("CW (Close)") : F("CCW (Open)"));
+      }
     }
   }
-
-  // Limit/monitor indicator
-  digitalWrite(LED_BUILTIN, digitalRead(MonitorPin) == LOW ? HIGH : LOW);
 }
 
 void handleSerialInput() {
   while (Serial.available() > 0) {
-    char cmd = Serial.read();
+    char c = (char)Serial.read();
 
-    if (cmd == '\r' || cmd == '\n') {
+    if (c == '\n' || c == '\r' || c == ' ') continue;
+
+    // Switch Active Axis: '1' through TOTAL_ACTUATORS ('5')
+    if (c >= '1' && c < ('1' + TOTAL_ACTUATORS)) {
+      if (activeMotorIndex < NUM_STEPPERS) {
+        motors[activeMotorIndex]->setState(MotorController::IDLE);
+      } else {
+        servoState = SERVO_IDLE;
+      }
+      
+      activeMotorIndex = c - '1';
+      Serial.print(F("Switched to Active Axis: ["));
+      Serial.print(c);
+      Serial.print(F("] "));
+      Serial.print(motorNames[activeMotorIndex]);
+
+      if (activeMotorIndex < NUM_STEPPERS) {
+        Serial.print(F(" | Speed: "));
+        Serial.print(motors[activeMotorIndex]->getTargetSpeed());
+        Serial.println(F(" steps/s"));
+      } else {
+        Serial.print(F(" | Current Angle: "));
+        Serial.print(currentServoAngle, 1);
+        Serial.print(F(" deg | StepSize: "));
+        Serial.print(servoStepSize, 2);
+        Serial.println(F(" deg/tick"));
+      }
       continue;
     }
 
-    // Switch active motor via digit keys
-    if (cmd >= '1' && cmd < ('1' + NUM_MOTORS)) {
-      activeMotorIndex = cmd - '1';
-      Serial.print(F("Switched control to: "));
-      Serial.println(motorNames[activeMotorIndex]);
-      return;
+    // Direct Servo Jogging (independent of active axis)
+    if (c == 'O' || c == 'o') {
+      servoState = SERVO_CCW;
+      lastServoJogTime = millis();
+      continue;
+    }
+    if (c == 'P' || c == 'p' || c == 'C' || c == 'c') {
+      servoState = SERVO_CW;
+      lastServoJogTime = millis();
+      continue;
     }
 
-    MotorController* activeMotor = motors[activeMotorIndex];
+    // Stepper Axis Controls
+    if (activeMotorIndex < NUM_STEPPERS) {
+      MotorController* activeMotor = motors[activeMotorIndex];
 
-    switch (cmd) {
-      case 'E':
-      case 'e': {
-        bool newState = !activeMotor->isDriverEnabled();
-        activeMotor->setDriverEnabled(newState);
-        Serial.print(motorNames[activeMotorIndex]);
-        Serial.print(F(" driver: "));
-        Serial.println(newState ? F("ENABLED") : F("DISABLED"));
-        break;
+      switch (c) {
+        case 'D':
+        case 'd':
+          if (activeMotor->isDriverEnabled()) {
+            activeMotor->setState(MotorController::CW);
+            lastJogCommandTime = millis();
+          }
+          break;
+
+        case 'A':
+        case 'a':
+          if (activeMotor->isDriverEnabled()) {
+            activeMotor->setState(MotorController::CCW);
+            lastJogCommandTime = millis();
+          }
+          break;
+
+        case '+':
+        case '=':
+          activeMotor->increaseSpeed();
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.print(F(" Speed increased to: "));
+          Serial.print(activeMotor->getTargetSpeed());
+          Serial.println(F(" steps/s"));
+          break;
+
+        case '-':
+        case '_':
+          activeMotor->decreaseSpeed();
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.print(F(" Speed decreased to: "));
+          Serial.print(activeMotor->getTargetSpeed());
+          Serial.println(F(" steps/s"));
+          break;
+
+        case 'S':
+        case 's':
+          activeMotor->setState(MotorController::IDLE);
+          break;
+
+        case 'E':
+        case 'e': {
+          bool newState = !activeMotor->isDriverEnabled();
+          activeMotor->setDriverEnabled(newState);
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.println(newState ? F(" driver: ENABLED") : F(" driver: DISABLED"));
+          break;
+        }
+
+        case 'W':
+        case 'w':
+          activeMotor->setCurrentPosition(0);
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.println(F(" position zeroed."));
+          break;
       }
+    } 
+    // Servo Axis Controls (Active Motor 5)
+    else {
+      switch (c) {
+        case 'D':
+        case 'd':
+          servoState = SERVO_CW;
+          lastServoJogTime = millis();
+          break;
 
-      case 'D':
-      case 'd':
-        if (!activeMotor->isDriverEnabled()) {
-          Serial.println(F("Driver disabled. Press 'E' to enable."));
+        case 'A':
+        case 'a':
+          servoState = SERVO_CCW;
+          lastServoJogTime = millis();
+          break;
+
+        case '+':
+        case '=':
+          servoStepSize += 0.2f;
+          if (servoStepSize > 8.0f) servoStepSize = 8.0f;
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.print(F(" StepSize increased to: "));
+          Serial.print(servoStepSize, 2);
+          Serial.println(F(" deg/tick"));
+          break;
+
+        case '-':
+        case '_':
+          servoStepSize -= 0.2f;
+          if (servoStepSize < 0.2f) servoStepSize = 0.2f;
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.print(F(" StepSize decreased to: "));
+          Serial.print(servoStepSize, 2);
+          Serial.println(F(" deg/tick"));
+          break;
+
+        case 'S':
+        case 's':
+          servoState = SERVO_IDLE;
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.print(F(" stopped at Angle: "));
+          Serial.print(currentServoAngle, 1);
+          Serial.println(F(" deg"));
+          break;
+
+        case 'E':
+        case 'e': {
+          if (servo.attached()) {
+            servo.detach();
+            Serial.println(F("GripperServo detached (unpowered/relaxed)."));
+          } else {
+            servo.attach(ServoPin);
+            servo.write((int)round(currentServoAngle));
+            Serial.println(F("GripperServo attached (holding position)."));
+          }
           break;
         }
-        activeMotor->setState(MotorController::CW);
-        Serial.print(motorNames[activeMotorIndex]);
-        Serial.println(F(" moving CW"));
-        break;
 
-      case 'A':
-      case 'a':
-        if (!activeMotor->isDriverEnabled()) {
-          Serial.println(F("Driver disabled. Press 'E' to enable."));
+        case 'W':
+        case 'w':
+          currentServoAngle = 0.0f;
+          if (servo.attached()) servo.write(0);
+          Serial.print(motorNames[activeMotorIndex]);
+          Serial.println(F(" angle zeroed to 0 deg."));
           break;
-        }
-        activeMotor->setState(MotorController::CCW);
-        Serial.print(motorNames[activeMotorIndex]);
-        Serial.println(F(" moving CCW"));
-        break;
-
-      case 'S':
-      case 's':
-        activeMotor->setState(MotorController::IDLE);
-        Serial.print(motorNames[activeMotorIndex]);
-        Serial.print(F(" stopped at position: "));
-        Serial.println(activeMotor->currentPosition());
-        break;
-
-      case 'W':
-      case 'w':
-        Serial.print(motorNames[activeMotorIndex]);
-        Serial.print(F(" zeroed. Previous: "));
-        Serial.println(activeMotor->currentPosition());
-        activeMotor->setCurrentPosition(0);
-        break;
-
-      default:
-        Serial.print(F("Unknown command: '"));
-        Serial.print(cmd);
-        Serial.println(F("'. Use 1/2 to select motor, and D, A, S, E, W to control."));
-        break;
+      }
     }
   }
 }
